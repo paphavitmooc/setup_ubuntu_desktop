@@ -69,6 +69,12 @@ kernel.randomize_va_space = 2
 # ── Shared memory hardening ───────────────────────────────
 kernel.shmmax = 268435456
 kernel.shmall = 268435456
+
+# ── User namespaces ────────────────────────────────────────
+# Required by: Chrome, Firefox, Docker, Flatpak sandboxes
+# Keeping enabled (=1) — disabling breaks desktop apps badly
+# The AppArmor unprivileged_userns profile handles abuse prevention
+kernel.unprivileged_userns_clone = 1
 EOF
 
 # Apply
