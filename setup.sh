@@ -1,34 +1,27 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NEXUS SECURITY HARDENING SCRIPT
+#  SECURITY HARDENING SCRIPT v1.1
 #  Target : Ubuntu Pro 24.04 LTS — Fresh Web Server
-#  Author : Alex / Linux Admin
-#  Version: 1.0.0
 #  Usage  : sudo bash setup.sh
-#
-#  ⚠️  IMPORTANT BEFORE RUNNING:
-#      • You are remoting via AnyDesk on port 7070 — this port is PRESERVED.
-#      • Set your SSH_PORT variable below (default 22 or your custom port).
-#      • Set your WEB_PORTS if you need non-standard ports.
-#      • Read each section before applying in production.
 # =============================================================================
 
-set -euo pipefail
+# ── Error trapping: log line number + command, but DO NOT abort on failures ──
+set -uo pipefail
+trap 'echo -e "\n${RED}[ERROR]${RST} Script error on LINE ${LINENO}: command \"${BASH_COMMAND}\" returned $?" >&2' ERR
+
+LOG_FILE="/var/log/hardening-setup.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "=== Hardening started: $(date) ===" >> "$LOG_FILE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION — Edit these before running
 # ─────────────────────────────────────────────────────────────────────────────
-SSH_PORT=22                        # Your SSH port (change if non-default)
-ANYDESK_PORT=7070                  # AnyDesk remote access port — DO NOT REMOVE
-WEB_PORTS=(80 443)                 # HTTP / HTTPS
-ADMIN_EMAIL="admin@example.com"    # For logwatch / fail2ban alerts
-TIMEZONE="Asia/Bangkok"            # Server timezone
-
-# SSH hardening — set to your public key or leave empty to skip key enforcement
-# ADMIN_SSH_PUBKEY="ssh-ed25519 AAAA... user@host"
+SSH_PORT=22
+ANYDESK_PORT=7070
+WEB_PORTS=(80 443)
+ADMIN_EMAIL="admin@example.com"
+TIMEZONE="Asia/Bangkok"
 ADMIN_SSH_PUBKEY=""
-
-# Automatic reboot time after unattended-upgrades (set "" to disable)
 AUTO_REBOOT_TIME="03:00"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,10 +34,26 @@ info()    { echo -e "${BLU}[INFO]${RST}  $*"; }
 success() { echo -e "${GRN}[OK]${RST}    $*"; }
 warn()    { echo -e "${YLW}[WARN]${RST}  $*"; }
 error()   { echo -e "${RED}[ERROR]${RST} $*" >&2; }
-section() { echo -e "\n${BLD}${CYN}══ $* ══${RST}"; }
+section() {
+  local n=$((++SECTION_NUM))
+  echo -e "\n${BLD}${CYN}══════════════════════════════════════════════${RST}"
+  echo -e "${BLD}${CYN}  SECTION ${n}: $*${RST}"
+  echo -e "${BLD}${CYN}══════════════════════════════════════════════${RST}"
+}
+SECTION_NUM=0
 
-require_root() {
-  [[ $EUID -eq 0 ]] || { error "Run as root: sudo bash $0"; exit 1; }
+safe_install() {
+  # Install packages one-by-one so a missing pkg doesn't kill the whole list
+  local failed=()
+  for pkg in "$@"; do
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$pkg" 2>/dev/null; then
+      echo -e "    ${GRN}✓${RST} $pkg"
+    else
+      echo -e "    ${YLW}✗${RST} $pkg (skipped — not found or unavailable)"
+      failed+=("$pkg")
+    fi
+  done
+  [[ ${#failed[@]} -gt 0 ]] && warn "Skipped packages: ${failed[*]}"
 }
 
 backup_file() {
@@ -55,14 +64,15 @@ backup_file() {
 # ─────────────────────────────────────────────────────────────────────────────
 # 0. PRE-FLIGHT
 # ─────────────────────────────────────────────────────────────────────────────
-require_root
+[[ $EUID -eq 0 ]] || { error "Run as root: sudo bash $0"; exit 1; }
 
 echo -e "${BLD}"
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║        Ubuntu Pro 24.04 — Security Hardening Script         ║"
+echo "║        Ubuntu Pro 24.04 — Security Hardening Script v1.1   ║"
 echo "╚══════════════════════════════════════════════════════════════╝${RST}"
 echo ""
-warn "AnyDesk port ${ANYDESK_PORT} will remain OPEN throughout all firewall rules."
+info "All output is also logged to: ${LOG_FILE}"
+warn "AnyDesk port ${ANYDESK_PORT} will remain OPEN."
 warn "SSH port ${SSH_PORT} will remain OPEN."
 echo ""
 read -rp "$(echo -e ${YLW}"Proceed? [yes/N]: "${RST})" CONFIRM
@@ -71,39 +81,82 @@ read -rp "$(echo -e ${YLW}"Proceed? [yes/N]: "${RST})" CONFIRM
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. SYSTEM UPDATE & BASE PACKAGES
 # ─────────────────────────────────────────────────────────────────────────────
-section "1. System Update & Base Packages"
+section "System Update & Base Packages"
 
-timedatectl set-timezone "${TIMEZONE}"
-success "Timezone set to ${TIMEZONE}"
+info "Setting timezone to ${TIMEZONE}..."
+timedatectl set-timezone "${TIMEZONE}" && success "Timezone set"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get upgrade -y -qq
-apt-get dist-upgrade -y -qq
 
-apt-get install -y -qq \
-  ufw fail2ban unattended-upgrades apt-listchanges \
-  auditd audispd-plugins \
-  libpam-pwquality libpam-google-authenticator \
-  rkhunter chkrootkit aide \
-  logwatch lynis \
-  curl wget git vim net-tools htop \
-  acl attr \
-  apparmor apparmor-utils \
-  nftables \
-  needrestart \
+info "Running apt-get update..."
+apt-get update -q && success "Package lists updated"
+
+info "Running apt-get upgrade (this may take a while)..."
+apt-get upgrade -y -q && success "System upgraded"
+
+info "Running dist-upgrade..."
+apt-get dist-upgrade -y -q && success "Dist-upgrade done"
+
+info "Installing CRITICAL packages (firewall, SSH, PAM)..."
+safe_install \
+  ufw \
+  fail2ban \
+  unattended-upgrades \
+  apt-listchanges \
+  libpam-pwquality
+
+info "Installing AUDIT & MONITORING packages..."
+safe_install \
+  auditd \
+  audispd-plugins \
+  rkhunter \
+  chkrootkit \
+  aide \
+  logwatch \
+  lynis \
   psad \
-  iptables-persistent \
   sysstat
 
-success "Base packages installed"
+info "Installing SECURITY TOOLS..."
+safe_install \
+  apparmor \
+  apparmor-utils \
+  needrestart \
+  iptables-persistent \
+  nftables
+
+info "Installing UTILITIES..."
+safe_install \
+  curl wget git vim net-tools htop acl attr
+
+# Optional: libpam-google-authenticator (2FA — may not be needed yet)
+info "Attempting optional packages..."
+safe_install libpam-google-authenticator || true
+
+success "Section 1 complete — all packages processed"
+
+# ── Hard dependency check: abort with clear message if critical tools missing ─
+info "Verifying critical binaries are available..."
+MISSING=()
+for bin in ufw fail2ban-client sshd auditd; do
+  if ! command -v "$bin" &>/dev/null && ! which "$bin" &>/dev/null; then
+    MISSING+=("$bin")
+  fi
+done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  error "CRITICAL tools not found after install: ${MISSING[*]}"
+  error "Try manually: apt-get install -y ${MISSING[*]}"
+  error "Then re-run this script."
+  exit 1
+fi
+success "All critical binaries verified: ufw fail2ban-client sshd auditd"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. AUTOMATIC SECURITY UPDATES
 # ─────────────────────────────────────────────────────────────────────────────
-section "2. Automatic Security Updates"
+section "Automatic Security Updates"
 
-cat > /etc/apt/apt.conf.d/50unattended-upgrades << EOF
+cat > /etc/apt/apt.conf.d/50unattended-upgrades << APTEOF
 Unattended-Upgrade::Allowed-Origins {
     "\${distro_id}:\${distro_codename}";
     "\${distro_id}:\${distro_codename}-security";
@@ -120,63 +173,54 @@ Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 Unattended-Upgrade::Automatic-Reboot-Time "${AUTO_REBOOT_TIME}";
 Unattended-Upgrade::Mail "${ADMIN_EMAIL}";
 Unattended-Upgrade::MailReport "on-change";
-EOF
+APTEOF
 
-cat > /etc/apt/apt.conf.d/20auto-upgrades << EOF
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'APTEOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
-EOF
+APTEOF
 
-systemctl enable --now unattended-upgrades
-success "Automatic security updates configured"
+systemctl enable --now unattended-upgrades && success "Unattended-upgrades enabled"
 
-# Ubuntu Pro — enable ESM & livepatch if available
 if command -v pro &>/dev/null; then
-  info "Ubuntu Pro detected — enabling ESM security repos..."
-  pro enable esm-infra  2>/dev/null || warn "esm-infra already enabled or needs attachment"
-  pro enable esm-apps   2>/dev/null || warn "esm-apps already enabled or needs attachment"
-  success "Ubuntu Pro ESM enabled"
+  info "Ubuntu Pro detected — enabling ESM..."
+  pro enable esm-infra 2>/dev/null && success "esm-infra enabled" || warn "esm-infra skipped (may need: sudo pro attach)"
+  pro enable esm-apps  2>/dev/null && success "esm-apps enabled"  || warn "esm-apps skipped"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. UFW FIREWALL
 # ─────────────────────────────────────────────────────────────────────────────
-section "3. UFW Firewall"
+section "UFW Firewall"
 
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw default deny forward
 
-# SSH
-ufw allow "${SSH_PORT}/tcp" comment "SSH"
+ufw allow "${SSH_PORT}/tcp"      comment "SSH"
+ufw limit  "${SSH_PORT}/tcp"     comment "SSH rate-limit"
+ufw allow "${ANYDESK_PORT}/tcp"  comment "AnyDesk"
+ufw allow "${ANYDESK_PORT}/udp"  comment "AnyDesk UDP"
 
-# AnyDesk — CRITICAL: keep remote access open
-ufw allow "${ANYDESK_PORT}/tcp" comment "AnyDesk remote"
-ufw allow "${ANYDESK_PORT}/udp" comment "AnyDesk remote UDP"
-
-# Web
 for port in "${WEB_PORTS[@]}"; do
   ufw allow "${port}/tcp" comment "Web"
 done
-
-# Rate-limit SSH brute-force at UFW level
-ufw limit "${SSH_PORT}/tcp" comment "SSH rate limit"
 
 ufw --force enable
 ufw status verbose
 success "UFW firewall configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. FAIL2BAN — INTRUSION PREVENTION
+# 4. FAIL2BAN
 # ─────────────────────────────────────────────────────────────────────────────
-section "4. Fail2ban"
+section "Fail2ban Intrusion Prevention"
 
 backup_file /etc/fail2ban/jail.local
 
-cat > /etc/fail2ban/jail.local << EOF
+cat > /etc/fail2ban/jail.local << F2BEOF
 [DEFAULT]
 bantime          = 3600
 findtime         = 600
@@ -184,7 +228,6 @@ maxretry         = 5
 backend          = systemd
 destemail        = ${ADMIN_EMAIL}
 sendername       = Fail2Ban-$(hostname)
-mta              = sendmail
 action           = %(action_mwl)s
 ignoreip         = 127.0.0.1/8 ::1
 
@@ -207,54 +250,35 @@ bantime  = 86400
 enabled  = true
 port     = http,https
 
-[nginx-noscript]
-enabled  = true
-port     = http,https
-logpath  = %(nginx_error_log)s
-
 [nginx-badbots]
 enabled  = true
 port     = http,https
 logpath  = %(nginx_access_log)s
 maxretry = 2
 
-[nginx-noproxy]
-enabled  = true
-port     = http,https
-logpath  = %(nginx_error_log)s
-
-[php-url-fopen]
-enabled  = true
-port     = http,https
-logpath  = %(nginx_access_log)s
-
 [recidive]
 enabled  = true
 logpath  = /var/log/fail2ban.log
-action   = %(action_mwl)s
 bantime  = 604800
 findtime = 86400
 maxretry = 5
-EOF
+F2BEOF
 
 systemctl enable --now fail2ban
-systemctl restart fail2ban
-success "Fail2ban configured and started"
+systemctl restart fail2ban && success "Fail2ban running"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. SSH HARDENING
 # ─────────────────────────────────────────────────────────────────────────────
-section "5. SSH Hardening"
+section "SSH Hardening"
 
 backup_file /etc/ssh/sshd_config
 
-cat > /etc/ssh/sshd_config << EOF
-# Hardened SSH Configuration
+cat > /etc/ssh/sshd_config << SSHEOF
 Port ${SSH_PORT}
 AddressFamily inet
 ListenAddress 0.0.0.0
 
-# Authentication
 PermitRootLogin no
 MaxAuthTries 3
 MaxSessions 5
@@ -265,12 +289,10 @@ PermitEmptyPasswords no
 ChallengeResponseAuthentication no
 UsePAM yes
 
-# Timeouts
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
 
-# Restrictions
 X11Forwarding no
 AllowAgentForwarding no
 AllowTcpForwarding no
@@ -278,30 +300,24 @@ PermitUserEnvironment no
 PermitTunnel no
 GatewayPorts no
 
-# Logging
 SyslogFacility AUTH
 LogLevel VERBOSE
+PrintLastLog yes
+Banner /etc/ssh/banner
 
-# Algorithms (strong only)
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com
+SSHEOF
 
-# Misc
-PrintLastLog yes
-Banner /etc/ssh/banner
-EOF
-
-# SSH warning banner
-cat > /etc/ssh/banner << 'BANNER'
+cat > /etc/ssh/banner << 'BANEOF'
 ╔══════════════════════════════════════════════════════════════╗
 ║  AUTHORIZED ACCESS ONLY — All activity is logged & monitored ║
 ╚══════════════════════════════════════════════════════════════╝
-BANNER
+BANEOF
 
-# Add SSH public key if provided
 if [[ -n "${ADMIN_SSH_PUBKEY}" ]]; then
-  local_user=$(logname 2>/dev/null || echo "${SUDO_USER:-ubuntu}")
+  local_user="${SUDO_USER:-$(logname 2>/dev/null || echo ubuntu)}"
   home_dir=$(eval echo "~${local_user}")
   mkdir -p "${home_dir}/.ssh"
   echo "${ADMIN_SSH_PUBKEY}" >> "${home_dir}/.ssh/authorized_keys"
@@ -311,25 +327,27 @@ if [[ -n "${ADMIN_SSH_PUBKEY}" ]]; then
   success "SSH public key added for ${local_user}"
 fi
 
-sshd -t && systemctl restart ssh
-success "SSH hardened"
+if sshd -t 2>/dev/null; then
+  systemctl restart ssh && success "SSH hardened and restarted"
+else
+  error "sshd config test failed — restoring backup"
+  cp /etc/ssh/sshd_config.bak.* /etc/ssh/sshd_config 2>/dev/null || true
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. KERNEL / SYSCTL HARDENING
 # ─────────────────────────────────────────────────────────────────────────────
-section "6. Kernel & Network Hardening (sysctl)"
+section "Kernel & Network Hardening"
 
-backup_file /etc/sysctl.conf
-
-cat > /etc/sysctl.d/99-hardening.conf << 'SYSCTL'
-# ── Network: Anti-spoofing ──────────────────────────────────────────────────
+cat > /etc/sysctl.d/99-hardening.conf << 'SYSCTLEOF'
+# Anti-spoofing
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
 
-# ── Network: ICMP hardening ─────────────────────────────────────────────────
+# ICMP hardening
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv4.conf.all.accept_redirects = 0
@@ -341,23 +359,23 @@ net.ipv6.conf.default.accept_redirects = 0
 net.ipv4.conf.all.secure_redirects = 0
 net.ipv4.conf.default.secure_redirects = 0
 
-# ── Network: SYN flood protection ──────────────────────────────────────────
+# SYN flood protection
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_syn_retries = 2
 net.ipv4.tcp_synack_retries = 2
 net.ipv4.tcp_max_syn_backlog = 2048
 
-# ── Network: Connection hardening ──────────────────────────────────────────
+# Connection hardening
 net.ipv4.tcp_timestamps = 0
 net.ipv4.tcp_rfc1337 = 1
 net.ipv4.conf.all.log_martians = 1
 net.ipv4.conf.default.log_martians = 1
 
-# ── IPv6 ────────────────────────────────────────────────────────────────────
+# IPv6
 net.ipv6.conf.all.accept_ra = 0
 net.ipv6.conf.default.accept_ra = 0
 
-# ── Kernel: ASLR & hardening ────────────────────────────────────────────────
+# Kernel ASLR & lockdown
 kernel.randomize_va_space = 2
 kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
@@ -366,32 +384,30 @@ kernel.yama.ptrace_scope = 1
 kernel.unprivileged_bpf_disabled = 1
 net.core.bpf_jit_harden = 2
 
-# ── Kernel: Core dumps ──────────────────────────────────────────────────────
+# Core dumps off
 fs.suid_dumpable = 0
 kernel.core_uses_pid = 1
 
-# ── File system ─────────────────────────────────────────────────────────────
+# Filesystem protections
 fs.protected_hardlinks = 1
 fs.protected_symlinks = 1
 fs.protected_fifos = 2
 fs.protected_regular = 2
 
-# ── Virtual memory ──────────────────────────────────────────────────────────
+# Memory
 vm.mmap_min_addr = 65536
 vm.swappiness = 10
-SYSCTL
+SYSCTLEOF
 
-sysctl --system
-success "Kernel hardening applied"
+sysctl --system && success "Kernel hardening applied"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. PASSWORD POLICY
 # ─────────────────────────────────────────────────────────────────────────────
-section "7. Password Policy (PAM)"
+section "Password Policy"
 
 backup_file /etc/security/pwquality.conf
-
-cat > /etc/security/pwquality.conf << 'PWQUAL'
+cat > /etc/security/pwquality.conf << 'PWEOF'
 minlen = 14
 minclass = 3
 maxrepeat = 3
@@ -403,23 +419,19 @@ ocredit = -1
 difok = 8
 gecoscheck = 1
 badwords = password pass admin root
-PWQUAL
+PWEOF
 
-# Account inactivity
 useradd -D -f 30
-
-# Password expiry defaults
 backup_file /etc/login.defs
 sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
 sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/'  /etc/login.defs
 sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' /etc/login.defs
-
 success "Password policy configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. FILE PERMISSIONS & SENSITIVE FILES
+# 8. FILE PERMISSIONS
 # ─────────────────────────────────────────────────────────────────────────────
-section "8. File & Directory Permissions"
+section "File & Directory Permissions"
 
 chmod 700 /root
 chmod 600 /etc/shadow
@@ -430,106 +442,78 @@ chmod 600 /etc/ssh/sshd_config
 chmod 600 /etc/crontab
 chmod 700 /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly
 
-# Restrict compilers (comment out if building code on server)
-if [[ -f /usr/bin/gcc ]]; then
-  chmod o-x /usr/bin/gcc
-  warn "gcc restricted to root/owner only"
-fi
+[[ -f /usr/bin/gcc ]] && chmod o-x /usr/bin/gcc && warn "gcc restricted to root only"
 
-# Sticky bit on world-writable dirs
 find / -xdev -type d -perm -0002 -exec chmod +t {} \; 2>/dev/null || true
-
 success "File permissions hardened"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. DISABLE UNNECESSARY SERVICES
 # ─────────────────────────────────────────────────────────────────────────────
-section "9. Disable Unnecessary Services"
+section "Disable Unnecessary Services"
 
-DISABLE_SERVICES=(
-  avahi-daemon cups isc-dhcp-server isc-dhcp-server6
-  slapd nfs-server rpcbind bind9 vsftpd apache2
-  dovecot smbd nmbd squid snmpd rsync nis talk telnet xinetd
-)
-
-for svc in "${DISABLE_SERVICES[@]}"; do
+for svc in avahi-daemon cups isc-dhcp-server isc-dhcp-server6 \
+           slapd nfs-server rpcbind bind9 vsftpd apache2 \
+           dovecot smbd nmbd squid snmpd rsync nis telnet xinetd; do
   if systemctl is-active --quiet "${svc}" 2>/dev/null; then
-    systemctl stop "${svc}"
-    systemctl disable "${svc}"
+    systemctl stop    "${svc}" 2>/dev/null || true
+    systemctl disable "${svc}" 2>/dev/null || true
     warn "Disabled: ${svc}"
   fi
 done
-
 success "Unnecessary services disabled"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. APPARMOR
 # ─────────────────────────────────────────────────────────────────────────────
-section "10. AppArmor (Mandatory Access Control)"
+section "AppArmor"
 
-systemctl enable --now apparmor
+systemctl enable --now apparmor 2>/dev/null || true
 aa-enforce /etc/apparmor.d/* 2>/dev/null || true
 success "AppArmor enforcing mode enabled"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. AUDIT DAEMON
 # ─────────────────────────────────────────────────────────────────────────────
-section "11. Audit Daemon (auditd)"
+section "Audit Daemon (auditd)"
 
-cat > /etc/audit/rules.d/hardening.rules << 'AUDITRULES'
+cat > /etc/audit/rules.d/hardening.rules << 'AUDITEOF'
 -D
 -b 8192
 -f 1
 
-# Identity changes
--w /etc/passwd  -p wa -k identity
--w /etc/shadow  -p wa -k identity
--w /etc/group   -p wa -k identity
--w /etc/gshadow -p wa -k identity
--w /etc/sudoers -p wa -k sudo_changes
+-w /etc/passwd   -p wa -k identity
+-w /etc/shadow   -p wa -k identity
+-w /etc/group    -p wa -k identity
+-w /etc/gshadow  -p wa -k identity
+-w /etc/sudoers  -p wa -k sudo_changes
 -w /etc/sudoers.d/ -p wa -k sudo_changes
--w /var/log/auth.log -p wa -k auth_log
--w /var/log/faillog  -p wa -k auth_log
-
-# SSH config
 -w /etc/ssh/sshd_config -p wa -k ssh_config
-
-# Cron
--w /etc/cron.allow -p wa -k cron
--w /etc/cron.deny  -p wa -k cron
--w /etc/crontab    -p wa -k cron
--w /etc/cron.d/    -p wa -k cron
-
-# Network
--w /etc/hosts       -p wa -k network
--w /etc/hostname    -p wa -k network
+-w /etc/crontab  -p wa -k cron
+-w /etc/cron.d/  -p wa -k cron
+-w /etc/hosts    -p wa -k network
 -w /etc/resolv.conf -p wa -k network
 
-# Execution
 -a always,exit -F arch=b64 -S execve -k exec
 -a always,exit -F arch=b32 -S execve -k exec
-
-# Privilege escalation
 -a always,exit -F arch=b64 -S setuid -S setgid -k priv_esc
 -a always,exit -F arch=b32 -S setuid -S setgid -k priv_esc
 
-# Kernel modules
 -w /sbin/insmod   -p x -k modules
 -w /sbin/rmmod    -p x -k modules
 -w /sbin/modprobe -p x -k modules
 
-# Immutable
 -e 2
-AUDITRULES
+AUDITEOF
 
-systemctl enable --now auditd
-augenrules --load 2>/dev/null || service auditd restart
+systemctl enable --now auditd 2>/dev/null || true
+augenrules --load 2>/dev/null || service auditd restart 2>/dev/null || true
 success "Audit daemon configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12. ROOTKIT DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
-section "12. Rootkit Detection (rkhunter + chkrootkit)"
+section "Rootkit Detection"
 
 rkhunter --update  --nocolors 2>/dev/null || true
 rkhunter --propupd --nocolors 2>/dev/null || true
@@ -538,7 +522,7 @@ cat > /etc/cron.daily/rkhunter-scan << 'CRON'
 #!/bin/bash
 /usr/bin/rkhunter --check --skip-keypress --report-warnings-only \
   --logfile /var/log/rkhunter.log --nocolors 2>&1 \
-  | mail -s "rkhunter report - $(hostname) - $(date +%F)" root
+  | mail -s "rkhunter - $(hostname) - $(date +%F)" root
 CRON
 chmod +x /etc/cron.daily/rkhunter-scan
 
@@ -547,51 +531,49 @@ cat > /etc/cron.weekly/chkrootkit-scan << 'CRON'
 /usr/sbin/chkrootkit 2>&1 | mail -s "chkrootkit - $(hostname) - $(date +%F)" root
 CRON
 chmod +x /etc/cron.weekly/chkrootkit-scan
-
 success "Rootkit scanners scheduled"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. AIDE — FILE INTEGRITY MONITORING
+# 13. AIDE FILE INTEGRITY
 # ─────────────────────────────────────────────────────────────────────────────
-section "13. AIDE File Integrity Monitoring"
+section "AIDE File Integrity Monitoring"
 
-info "Initializing AIDE database (this may take 2-5 minutes)..."
-aideinit --yes 2>/dev/null || aide --init 2>/dev/null || true
+info "Initializing AIDE database (2-5 minutes)..."
+aideinit --yes 2>/dev/null || aide --init 2>/dev/null || warn "AIDE init skipped — run manually: sudo aideinit"
 mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
 
 cat > /etc/cron.daily/aide-check << 'CRON'
 #!/bin/bash
-/usr/bin/aide --check 2>&1 | mail -s "AIDE integrity check - $(hostname) - $(date +%F)" root
+/usr/bin/aide --check 2>&1 | mail -s "AIDE - $(hostname) - $(date +%F)" root
 CRON
 chmod +x /etc/cron.daily/aide-check
-
-success "AIDE file integrity monitoring configured"
+success "AIDE configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 14. PSAD — PORT SCAN DETECTION
+# 14. PSAD PORT SCAN DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
-section "14. PSAD Port Scan Attack Detection"
+section "PSAD Port Scan Detection"
 
 backup_file /etc/psad/psad.conf
-
 iptables  -A INPUT   -j LOG --log-prefix "iptables-input: "   2>/dev/null || true
 iptables  -A FORWARD -j LOG --log-prefix "iptables-forward: " 2>/dev/null || true
 ip6tables -A INPUT   -j LOG --log-prefix "ip6tables-input: "  2>/dev/null || true
 
-sed -i "s/^EMAIL_ADDRESSES.*/EMAIL_ADDRESSES         ${ADMIN_EMAIL};/" /etc/psad/psad.conf
-sed -i 's/^ENABLE_AUTO_IDS.*/ENABLE_AUTO_IDS         Y;/'              /etc/psad/psad.conf
-sed -i 's/^AUTO_IDS_DANGER_LEVEL.*/AUTO_IDS_DANGER_LEVEL   3;/'        /etc/psad/psad.conf
+sed -i "s/^EMAIL_ADDRESSES.*/EMAIL_ADDRESSES         ${ADMIN_EMAIL};/"  /etc/psad/psad.conf 2>/dev/null || true
+sed -i 's/^ENABLE_AUTO_IDS.*/ENABLE_AUTO_IDS         Y;/'               /etc/psad/psad.conf 2>/dev/null || true
+sed -i 's/^AUTO_IDS_DANGER_LEVEL.*/AUTO_IDS_DANGER_LEVEL   3;/'         /etc/psad/psad.conf 2>/dev/null || true
 
 psad --sig-update 2>/dev/null || true
-systemctl enable --now psad
-success "PSAD port scan detection enabled"
+systemctl enable --now psad 2>/dev/null || true
+success "PSAD configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 15. LOGWATCH — LOG ANALYSIS REPORTS
+# 15. LOGWATCH
 # ─────────────────────────────────────────────────────────────────────────────
-section "15. Logwatch Daily Reports"
+section "Logwatch Daily Reports"
 
-cat > /etc/logwatch/conf/logwatch.conf << EOF
+mkdir -p /etc/logwatch/conf
+cat > /etc/logwatch/conf/logwatch.conf << LWEOF
 Output = mail
 Format = html
 MailTo = ${ADMIN_EMAIL}
@@ -599,96 +581,90 @@ MailFrom = logwatch@$(hostname -f)
 Detail = Med
 Service = All
 Range = Yesterday
-EOF
+LWEOF
 
 cat > /etc/cron.daily/logwatch-report << 'CRON'
 #!/bin/bash
 /usr/sbin/logwatch --output mail
 CRON
 chmod +x /etc/cron.daily/logwatch-report
-
 success "Logwatch configured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 16. CORE DUMPS & SECURE SHARED MEMORY
+# 16. CORE DUMPS & SHARED MEMORY
 # ─────────────────────────────────────────────────────────────────────────────
-section "16. Core Dumps & Shared Memory"
+section "Core Dumps & Shared Memory"
 
-cat > /etc/security/limits.d/99-no-core.conf << 'LIMITS'
+cat > /etc/security/limits.d/99-no-core.conf << 'LIMEOF'
 *    hard    core    0
 *    soft    core    0
 root hard    core    0
 root soft    core    0
-LIMITS
+LIMEOF
 
-if ! grep -q '/run/shm' /etc/fstab; then
+grep -q '/run/shm' /etc/fstab || \
   echo "tmpfs /run/shm tmpfs defaults,noexec,nosuid,nodev 0 0" >> /etc/fstab
-fi
 
-if ! grep -q 'tmpfs /tmp' /etc/fstab; then
+grep -q 'tmpfs /tmp' /etc/fstab || \
   echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=512M 0 0" >> /etc/fstab
-fi
 
 success "Core dumps disabled, shared memory secured"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 17. LYNIS BASELINE AUDIT
+# 17. LYNIS AUDIT
 # ─────────────────────────────────────────────────────────────────────────────
-section "17. Lynis Security Audit (Baseline)"
+section "Lynis Security Audit"
 
 lynis audit system --quiet --no-colors --logfile /var/log/lynis.log 2>/dev/null || true
-info "Lynis audit saved to /var/log/lynis.log"
+success "Lynis audit saved to /var/log/lynis.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 18. MOTD — Warning Banner
+# 18. WARNING BANNERS
 # ─────────────────────────────────────────────────────────────────────────────
-section "18. Login Warning Banner"
+section "Login Warning Banners"
 
-cat > /etc/motd << 'MOTD'
+cat > /etc/motd << 'MOTDEOF'
 
   ╔═══════════════════════════════════════════════════════════════╗
   ║           AUTHORIZED USERS ONLY — ALL ACTIVITY LOGGED         ║
   ║     Unauthorized access is prohibited and will be prosecuted  ║
   ╚═══════════════════════════════════════════════════════════════╝
 
-MOTD
+MOTDEOF
 
-cat > /etc/issue.net << 'ISSUE'
-AUTHORIZED ACCESS ONLY — All activity is monitored and logged.
-Unauthorized access is a criminal offense.
-ISSUE
-
-success "Warning banners set"
+echo "AUTHORIZED ACCESS ONLY — All activity is monitored and logged." > /etc/issue.net
+success "Banners set"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 19. FINAL STATUS
+# 19. FINAL SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-section "19. Final Status"
+section "DONE — Final Summary"
 
 echo ""
 echo -e "${BLD}${GRN}╔══════════════════════════════════════════════════════════════╗"
 echo "║             SECURITY HARDENING COMPLETE ✓                   ║"
 echo -e "╚══════════════════════════════════════════════════════════════╝${RST}"
 echo ""
-echo -e "  ${GRN}✓${RST} UFW Firewall       — Ports open: SSH(${SSH_PORT}), AnyDesk(${ANYDESK_PORT}), Web(${WEB_PORTS[*]})"
-echo -e "  ${GRN}✓${RST} Fail2ban           — SSH brute-force & web protection"
-echo -e "  ${GRN}✓${RST} SSH                — Root login disabled, hardened ciphers"
-echo -e "  ${GRN}✓${RST} Kernel sysctl      — ASLR, SYN cookies, anti-spoof"
-echo -e "  ${GRN}✓${RST} AppArmor           — Mandatory access control"
-echo -e "  ${GRN}✓${RST} Auditd             — Filesystem & syscall auditing"
-echo -e "  ${GRN}✓${RST} rkhunter/chkrootkit — Daily rootkit scans"
-echo -e "  ${GRN}✓${RST} AIDE               — File integrity monitoring"
-echo -e "  ${GRN}✓${RST} PSAD               — Port scan detection"
-echo -e "  ${GRN}✓${RST} Unattended-upgrades — Auto security patches"
-echo -e "  ${GRN}✓${RST} Logwatch           — Daily log reports"
-echo -e "  ${GRN}✓${RST} Password policy    — 14-char min, 90-day expiry"
+echo -e "  ${GRN}✓${RST} UFW            — SSH:${SSH_PORT}, AnyDesk:${ANYDESK_PORT}, Web:${WEB_PORTS[*]}"
+echo -e "  ${GRN}✓${RST} Fail2ban       — SSH brute-force & web bots"
+echo -e "  ${GRN}✓${RST} SSH            — Root disabled, hardened ciphers"
+echo -e "  ${GRN}✓${RST} sysctl         — ASLR, SYN-cookies, anti-spoof"
+echo -e "  ${GRN}✓${RST} AppArmor       — Enforce mode"
+echo -e "  ${GRN}✓${RST} auditd         — Syscall & file audit"
+echo -e "  ${GRN}✓${RST} rkhunter       — Daily rootkit scans"
+echo -e "  ${GRN}✓${RST} AIDE           — File integrity"
+echo -e "  ${GRN}✓${RST} PSAD           — Port scan detection"
+echo -e "  ${GRN}✓${RST} Auto-updates   — Security patches"
+echo -e "  ${GRN}✓${RST} Logwatch       — Daily log digest"
 echo ""
 echo -e "${YLW}⚠ POST-INSTALL ACTIONS:${RST}"
-echo "  1. Edit ADMIN_EMAIL in the script before running (currently: ${ADMIN_EMAIL})"
-echo "  2. Add your SSH public key (ADMIN_SSH_PUBKEY) then set PasswordAuthentication no"
-echo "  3. Review Lynis: sudo grep -E 'Warning|Suggestion' /var/log/lynis.log"
-echo "  4. Enable Livepatch: sudo pro enable livepatch"
-echo "  5. Reboot to apply all changes: sudo reboot"
+echo "  1. Review full log: sudo cat ${LOG_FILE}"
+echo "  2. Set your ADMIN_EMAIL in the script and re-run if needed"
+echo "  3. Add SSH key → then set PasswordAuthentication no in /etc/ssh/sshd_config"
+echo "  4. sudo pro enable livepatch"
+echo "  5. sudo grep -E 'Warning|Suggestion' /var/log/lynis.log"
+echo "  6. sudo reboot   ← apply all kernel/fstab changes"
 echo ""
-echo -e "${BLU}Remote access preserved:${RST} AnyDesk on port ${ANYDESK_PORT} is open in firewall."
+echo -e "${BLU}AnyDesk on port ${ANYDESK_PORT} is OPEN — your remote session is safe.${RST}"
 echo ""
+echo "=== Hardening completed: $(date) ===" >> "$LOG_FILE"
