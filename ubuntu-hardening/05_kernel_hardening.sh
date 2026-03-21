@@ -10,8 +10,10 @@ cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%F)
 
 cat > /etc/sysctl.d/99-security.conf <<'EOF'
 # ── Network: IP Spoofing / Source Routing ─────────────────
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
+# rp_filter=2 (loose mode) — still blocks spoofing but avoids
+# NetworkManager connectivity-check conflict on Contabo VPS
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
@@ -44,11 +46,13 @@ net.ipv4.conf.all.log_martians = 1
 net.ipv4.conf.default.log_martians = 1
 
 # ── IPv6 tweaks ───────────────────────────────────────────
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.default.accept_ra = 0
+# accept_ra=1 — keep enabled for Contabo VPS IPv6 routing
+# Disabling causes periodic route flushes and connection drops
+net.ipv6.conf.all.accept_ra = 1
+net.ipv6.conf.default.accept_ra = 1
 
 # ── TCP hardening ─────────────────────────────────────────
-net.ipv4.tcp_timestamps = 0           # Hides uptime
+net.ipv4.tcp_timestamps = 1           # Keep enabled — disabling causes drops on some ISPs/middleboxes
 net.ipv4.tcp_rfc1337 = 1             # TIME-WAIT assassination attack protection
 
 # ── Kernel: restrict ptrace & core dumps ──────────────────

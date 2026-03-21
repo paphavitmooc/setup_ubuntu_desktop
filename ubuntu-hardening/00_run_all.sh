@@ -26,6 +26,8 @@ SCRIPTS=(
   "08_log_monitoring.sh"
   "09_web_server_security.sh"
   "10_final_audit.sh"
+  "11_new_app_helper.sh"
+  "12_network_stability.sh"
 )
 
 log "====== Ubuntu 24.04 Hardening Suite Started ======"
