@@ -32,15 +32,28 @@ SCRIPTS=(
 
 log "====== Ubuntu 24.04 Hardening Suite Started ======"
 
+FAILED_SCRIPTS=()
+
 for script in "${SCRIPTS[@]}"; do
   if [[ -f "$SCRIPT_DIR/$script" ]]; then
     log ">>> Running: $script"
     chmod +x "$SCRIPT_DIR/$script"
-    bash "$SCRIPT_DIR/$script" 2>&1 | tee -a "$LOG_FILE"
-    log "<<< Done: $script"
+    if bash "$SCRIPT_DIR/$script" 2>&1 | tee -a "$LOG_FILE"; then
+      log "<<< Done: $script"
+    else
+      log "[ERROR] $script failed (exit $?) — continuing with remaining scripts"
+      FAILED_SCRIPTS+=("$script")
+    fi
   else
     log "[WARN] Script not found: $script — skipping"
   fi
 done
+
+if [[ ${#FAILED_SCRIPTS[@]} -gt 0 ]]; then
+  log "====== WARNING: ${#FAILED_SCRIPTS[@]} script(s) failed: ${FAILED_SCRIPTS[*]} ======"
+  log "====== Review $LOG_FILE for details. ======"
+else
+  log "====== All scripts completed successfully. ======"
+fi
 
 log "====== Hardening Complete. Review: $LOG_FILE ======"

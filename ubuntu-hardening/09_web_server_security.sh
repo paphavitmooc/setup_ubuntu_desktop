@@ -11,12 +11,13 @@ if ! command -v nginx &>/dev/null; then
   apt-get install -y nginx
 fi
 
-# ── Nginx: security-focused global config ─────────────────
-cat > /etc/nginx/conf.d/security.conf <<'EOF'
-# ── Hide Nginx version ────────────────────────────────────
-server_tokens off;
-
-# ── Security headers ──────────────────────────────────────
+# ── Security headers snippet (included per server block) ──
+# Headers are placed in a snippet rather than conf.d/ because nginx's
+# add_header inheritance rule drops ALL parent headers if a server block
+# defines even one add_header of its own (e.g. certbot's HSTS header).
+# Each server block must include: include snippets/security-headers.conf;
+mkdir -p /etc/nginx/snippets
+cat > /etc/nginx/snippets/security-headers.conf <<'EOF'
 add_header X-Frame-Options              "SAMEORIGIN"            always;
 add_header X-Content-Type-Options       "nosniff"               always;
 add_header X-XSS-Protection             "1; mode=block"         always;
@@ -25,6 +26,12 @@ add_header Permissions-Policy           "geolocation=(), microphone=(), camera=(
 add_header Content-Security-Policy      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';" always;
 add_header Strict-Transport-Security    "max-age=63072000; includeSubDomains; preload" always;
 add_header X-Permitted-Cross-Domain-Policies "none" always;
+EOF
+
+# ── Nginx: security-focused global config ─────────────────
+cat > /etc/nginx/conf.d/security.conf <<'EOF'
+# ── Hide Nginx version ────────────────────────────────────
+server_tokens off;
 
 # ── Rate limiting zones ───────────────────────────────────
 limit_req_zone $binary_remote_addr zone=general:10m  rate=10r/s;
@@ -69,6 +76,8 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+
+    include snippets/security-headers.conf;
 
     # Apply rate limiting
     limit_req zone=general burst=20 nodelay;

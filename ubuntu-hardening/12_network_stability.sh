@@ -23,7 +23,7 @@ echo "[12] Installing Netplan permissions boot service..."
 cat > /etc/systemd/system/fix-netplan-perms.service << 'EOF'
 [Unit]
 Description=Fix Netplan file permissions
-DefaultDependencies=no
+After=local-fs.target
 Before=NetworkManager.service
 
 [Service]
@@ -32,28 +32,28 @@ ExecStart=/bin/bash -c 'chmod 600 /etc/netplan/*.yaml; chown root:root /etc/netp
 RemainAfterExit=yes
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=basic.target
 EOF
 
 systemctl daemon-reload
 systemctl enable fix-netplan-perms.service
 echo "[12]   Boot service installed."
 
-# ── Fix 3: Disable NM connectivity check (rp_filter conflict) ──
+# ── Fix 3: NM connectivity check + stable MAC ─────────────────
 echo "[12] Configuring NetworkManager connectivity check..."
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/99-stability.conf << 'EOF'
 [connectivity]
-# Disable NM connectivity checking — conflicts with rp_filter=2
-# System uses standard routing, no need for NM polling
-uri=http://connectivity-check.ubuntu.com/
-interval=0
-
-[main]
-connectivity-check-enabled=false
+# Google's generate_204 endpoint — high availability, returns HTTP 204.
+# Replaced connectivity-check.ubuntu.com which had prolonged outages.
+# interval=60 recovers the network icon within 1 minute after any
+# transient failure (down from the 300s default).
+uri=http://connectivitycheck.gstatic.com/generate_204
+interval=60
+response=
 
 [connection]
-# Stable MAC address — prevents interface rename drops
+# Stable MAC address — prevents interface rename drops on VPS
 wifi.cloned-mac-address=stable
 ethernet.cloned-mac-address=stable
 EOF

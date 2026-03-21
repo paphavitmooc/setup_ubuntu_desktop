@@ -64,8 +64,8 @@ ssh-keygen -t rsa -b 4096 -f /etc/ssh/ssh_host_rsa_key -N "" 2>/dev/null || true
 # Remove weak moduli
 awk '$5 >= 3071' /etc/ssh/moduli > /tmp/moduli.safe && mv /tmp/moduli.safe /etc/ssh/moduli
 
-# Test config and restart
-sshd -t && systemctl restart ssh
+# Test config and restart (service name is 'ssh' on Ubuntu, 'sshd' on some cloud images)
+sshd -t && (systemctl restart ssh 2>/dev/null || systemctl restart sshd)
 
 echo "[03] ✓ SSH hardened — PasswordAuthentication still ON (disable after adding SSH keys)"
 echo "[03]   To disable password auth: set PasswordAuthentication no in /etc/ssh/sshd_config.d/99-hardening.conf"

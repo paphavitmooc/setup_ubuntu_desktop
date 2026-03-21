@@ -32,10 +32,21 @@ cat > /etc/aide/aide.conf.d/99-custom.conf <<'EOF'
 EOF
 
 # Initialise AIDE database
-aide --config=/etc/aide/aide.conf --init 2>&1 | tail -5
-if [[ -f /var/lib/aide/aide.db.new ]]; then
-  cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-  echo "[07] AIDE database initialised at /var/lib/aide/aide.db"
+if aide --config=/etc/aide/aide.conf --init 2>&1 | tail -5; then
+  # Search for the output DB — path depends on distro/aide version
+  DB_NEW=""
+  for candidate in /var/lib/aide/aide.db.new /var/lib/aide/aide.db.new.gz; do
+    [[ -f "$candidate" ]] && DB_NEW="$candidate" && break
+  done
+  if [[ -n "$DB_NEW" ]]; then
+    cp "$DB_NEW" /var/lib/aide/aide.db
+    echo "[07] AIDE database initialised at /var/lib/aide/aide.db"
+  else
+    echo "[07] WARNING: AIDE init succeeded but database not found at expected path."
+    echo "[07]          Check: ls /var/lib/aide/ — copy the .new file to aide.db manually."
+  fi
+else
+  echo "[07] WARNING: AIDE initialisation failed — check output above. Daily checks will not work."
 fi
 
 # Schedule daily AIDE checks at 3:00 AM

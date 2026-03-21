@@ -121,7 +121,7 @@ case "${APP,,}" in
     sudo sysctl -w net.ipv4.ip_forward=1
     sudo sed -i 's/^net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/' /etc/sysctl.d/99-security.conf
     sudo ufw allow in on docker0 comment 'Docker internal'
-    sudo ufw allow 2375/tcp comment 'Docker daemon (local only)'
+    sudo ufw allow from 127.0.0.1 to any port 2375 comment 'Docker daemon (localhost only)'
     echo "    Docker networking enabled."
     ;;
   nginx|apache|apache2)

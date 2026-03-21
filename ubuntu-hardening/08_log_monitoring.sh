@@ -24,7 +24,7 @@ EOF
 systemctl restart systemd-journald
 
 # ── rsyslog: forward auth logs clearly ───────────────────
-cat >> /etc/rsyslog.d/49-hardening.conf <<'EOF'
+cat > /etc/rsyslog.d/49-hardening.conf <<'EOF'
 # Separate auth events
 auth,authpriv.*                 /var/log/auth.log
 # Log all kernel messages
@@ -55,12 +55,6 @@ EOF
 chmod 640 /var/log/auth.log 2>/dev/null || true
 chmod 640 /var/log/syslog 2>/dev/null || true
 chmod 750 /var/log 2>/dev/null || true
-
-# ── Protect logs from tampering ───────────────────────────
-# Set append-only on critical logs (chattr)
-for logfile in /var/log/auth.log /var/log/syslog /var/log/kern.log; do
-  [[ -f "$logfile" ]] && chattr +a "$logfile" && echo "[08] Set append-only: $logfile"
-done
 
 # ── Logrotate: secure settings ────────────────────────────
 cat > /etc/logrotate.d/secure-logs <<'EOF'
